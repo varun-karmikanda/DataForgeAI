@@ -9,7 +9,7 @@ import httpx
 from app.schemas import ConnectorParams, ResolvedResult
 
 MAX_RESULTS = 20  # per page
-MAX_PAGES = 2
+MAX_PAGES = 4
 _ALT_SPELLING = {"bangalore": "Bengaluru", "bengaluru": "Bangalore"}
 DEFAULT_COUNTRY = os.environ.get("ADZUNA_COUNTRY", "in")  # 'in' = India; 'gb','us', etc.
 

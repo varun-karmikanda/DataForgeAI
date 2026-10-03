@@ -1,10 +1,12 @@
 "use client";
 
-import { Suspense, useEffect, useState, useRef, useCallback } from "react";
+import { Suspense, useEffect, useState, useRef, useCallback, type FormEvent } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { motion, AnimatePresence } from "framer-motion";
-import { ArrowLeft, Download, Copy, Check, Terminal, XCircle, RotateCcw } from "lucide-react";
+import { ArrowLeft, ArrowUp, Download, Copy, Check, Terminal, XCircle, RotateCcw } from "lucide-react";
 import { ResultsTable } from "@/components/workflow/results-table";
+import { InsightsPanel } from "@/components/workflow/insights-panel";
+import { SourcesPanel } from "@/components/workflow/sources-panel";
 import { PipelineGraph } from "@/components/workflow/pipeline-graph";
 import { LiveLogFeed } from "@/components/workflow/live-log-feed";
 import { AgentStatusStrip } from "@/components/workflow/agent-status-strip";
@@ -35,6 +37,7 @@ function WorkflowPageInner() {
   const [showLogs, setShowLogs] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [retryKey, setRetryKey] = useState(0);
+  const [followup, setFollowup] = useState("");
   const abortRef = useRef<(() => void) | null>(null);
   const liveTaskIdRef = useRef<string | null>(taskId || null);
 
@@ -178,6 +181,11 @@ function WorkflowPageInner() {
     return () => { clearTimeout(t); abortRef.current?.(); };
   }, [prompt, taskId, retryKey, handleEvent, handleError]);
 
+  // "missing" just means a page didn't publish that field (e.g. posted date) - not a failure.
+  const allIssues = store.validatedResult?.issues ?? [];
+  const emptyFieldCount = allIssues.filter((i) => i.reason === "missing").length;
+  const realIssueCount = allIssues.length - emptyFieldCount;
+
   const isRunning = ["planning", "discovering", "extracting", "critiquing", "validating"].includes(store.stage);
 
   const handleCancel = async () => {
@@ -203,6 +211,26 @@ function WorkflowPageInner() {
     setShowResults(false);
     setLoadError(null);
     setRetryKey((key) => key + 1);
+  };
+
+  // Conversation thread: the first turn is the original request; every later turn is a
+  // "Refine:" follow-up that was appended to the same prompt.
+  const fullPrompt = prompt || store.prompt;
+  const turns = fullPrompt ? fullPrompt.split("\nRefine: ") : [];
+
+  const handleFollowup = (e: FormEvent) => {
+    e.preventDefault();
+    const text = followup.trim();
+    if (!text || isRunning || !fullPrompt) return;
+    // Same page, same thread: add the follow-up to the original prompt and re-run in place.
+    const combined = `${fullPrompt}\nRefine: ${text}`;
+    abortRef.current?.();
+    abortRef.current = null;
+    useWorkflowStore.getState().reset();
+    setShowResults(false);
+    setLoadError(null);
+    setFollowup("");
+    router.replace(`/workflow?prompt=${encodeURIComponent(combined)}`);
   };
 
   const handleCopyJson = () => {
@@ -293,38 +321,69 @@ function WorkflowPageInner() {
         </div>
       </motion.header>
 
-      {/* Agent status strip */}
-      <div className="px-6 py-3">
-        <AgentStatusStrip />
-      </div>
+      {/* Conversation thread */}
+      {turns.length > 0 && (
+        <div className="px-6 flex flex-col gap-2 items-end">
+          {turns.map((turn, i) => (
+            <div
+              key={i}
+              className="max-w-2xl rounded-2xl rounded-br-sm border border-border-subtle bg-elevated px-4 py-2 text-sm text-text-primary"
+            >
+              {i > 0 && (
+                <span className="mr-2 text-[10px] font-mono uppercase tracking-wider text-cyan">refine</span>
+              )}
+              {turn}
+            </div>
+          ))}
+        </div>
+      )}
 
-      {/* Main content: Graph */}
-      <div className="flex flex-col gap-4 px-6 pb-6">
-        {loadError && (
-          <div className="text-sm text-rose bg-rose/10 border border-rose/20 rounded-lg px-4 py-3">
-            Couldn&apos;t load this workflow: {loadError}
-          </div>
+      {/* Agent status strip + pipeline graph — only while the run is in progress */}
+      <AnimatePresence>
+        {store.stage !== "complete" && (
+          <motion.div
+            key="pipeline-in-progress"
+            initial={{ opacity: 1 }}
+            exit={{ opacity: 0, height: 0 }}
+            transition={{ duration: 0.4 }}
+            className="overflow-hidden"
+          >
+            <div className="px-6 py-3">
+              <AgentStatusStrip />
+            </div>
+            <div className="flex flex-col gap-4 px-6 pb-6">
+              {loadError && (
+                <div className="text-sm text-rose bg-rose/10 border border-rose/20 rounded-lg px-4 py-3">
+                  Couldn&apos;t load this workflow: {loadError}
+                </div>
+              )}
+              <motion.div
+                initial={{ opacity: 0, scale: 0.98 }}
+                animate={{ opacity: 1, scale: 1 }}
+                transition={{ duration: 0.5 }}
+                className="h-[420px]"
+              >
+                <PipelineGraph />
+              </motion.div>
+            </div>
+          </motion.div>
         )}
-        <motion.div
-          initial={{ opacity: 0, scale: 0.98 }}
-          animate={{ opacity: 1, scale: 1 }}
-          transition={{ duration: 0.5 }}
-          className="h-[420px]"
-        >
-          <PipelineGraph />
-        </motion.div>
+      </AnimatePresence>
 
+      {/* Stat cards — shown once the pipeline completes */}
+      <div className="px-6">
         <AnimatePresence>
           {store.stage === "complete" && (
             <motion.div
               initial={{ opacity: 0, y: 20 }}
               animate={{ opacity: 1, y: 0 }}
               exit={{ opacity: 0, y: 20 }}
-              className="grid grid-cols-3 gap-3 max-w-md"
+              className="grid grid-cols-4 gap-3 max-w-xl pb-6"
             >
               <StatCard label="Records" value={store.validatedResult?.clean_records.length || 0} color="cyan" />
-              <StatCard label="Issues" value={store.validatedResult?.issues.length || 0} color="amber" />
-              <StatCard label="Merged" value={store.validatedResult?.merges.length || 0} color="violet" />
+              <StatCard label="Real issues" value={realIssueCount} color="amber" />
+              <StatCard label="Empty fields" value={emptyFieldCount} color="slate" />
+              <StatCard label="Duplicates merged" value={store.validatedResult?.merges.length || 0} color="violet" />
             </motion.div>
           )}
         </AnimatePresence>
@@ -349,11 +408,39 @@ function WorkflowPageInner() {
                 </span>
               </div>
 
+              <InsightsPanel records={store.validatedResult.clean_records} />
               <ResultsTable records={store.validatedResult.clean_records} />
+              <SourcesPanel />
             </div>
           </motion.div>
         )}
       </AnimatePresence>
+      {/* Follow-up box: refine the same search instead of starting a new task */}
+      {(store.stage === "complete" || store.stage === "error") && (
+        <form
+          onSubmit={handleFollowup}
+          className="sticky bottom-0 z-40 mt-auto bg-gradient-to-t from-void via-void/95 to-transparent px-6 pb-4 pt-6 pr-36"
+        >
+          <div className="flex items-center gap-2 rounded-2xl border border-border-subtle bg-elevated px-4 py-2 focus-within:border-cyan/40">
+            <input
+              value={followup}
+              onChange={(e) => setFollowup(e.target.value)}
+              placeholder="Refine this search, e.g. only in Bangalore, 0-1 years experience..."
+              maxLength={500}
+              className="flex-1 bg-transparent text-sm text-text-primary placeholder:text-text-muted outline-none"
+            />
+            <button
+              type="submit"
+              disabled={!followup.trim()}
+              aria-label="Send follow-up"
+              className="rounded-full bg-cyan/10 p-2 text-cyan transition-colors hover:bg-cyan/20 disabled:opacity-40"
+            >
+              <ArrowUp className="h-4 w-4" />
+            </button>
+          </div>
+        </form>
+      )}
+
       {/* Log popup */}
       <button
         onClick={() => setShowLogs((v) => !v)}
@@ -385,12 +472,13 @@ function StatCard({
 }: {
   label: string;
   value: number;
-  color: "cyan" | "amber" | "violet";
+  color: "cyan" | "amber" | "violet" | "slate";
 }) {
   const colors = {
     cyan: "border-cyan/20 text-cyan",
     amber: "border-amber/20 text-amber",
     violet: "border-violet/20 text-violet",
+    slate: "border-border-subtle text-text-secondary",
   };
 
   return (

@@ -99,7 +99,27 @@ when that field is present. If every record passes, return {{"violations": []}}.
     return issues
 
 
+_EMAIL_FIND_RE = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
+
+
+def _clean_record(record: ExtractedRecord) -> None:
+    """Normalizes whitespace, emails and links in place."""
+    for key, value in list(record.data.items()):
+        if not isinstance(value, str):
+            continue
+        v = re.sub(r"\s+", " ", value).strip().strip(",;|")
+        k = key.lower()
+        if "email" in k:
+            m = _EMAIL_FIND_RE.search(v)
+            v = m.group(0).lower() if m else v
+        elif any(h in k for h in ("url", "link", "website")) and v.startswith("www."):
+            v = "https://" + v
+        record.data[key] = v or None
+
+
 def validate_and_dedupe(records: list, validation_rules: list) -> ValidatedResult:
+    for record in records:
+        _clean_record(record)
     issues: list = []
     for i, record in enumerate(records):
         for field, value in record.data.items():

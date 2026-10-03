@@ -6,10 +6,10 @@ import { ArrowUp, Loader2 } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 const EXAMPLE_PROMPTS = [
-  "Find me jobs that are hiring freshers of computer science and engineering in bangalore",
-  "Get me the latest research papers on quantum computing from arxiv",
+  "Find sponsorship opportunities for college tech fests in Karnataka with contact emails",
   "Collect pricing data for SaaS project management tools",
-  "Gather competitor analysis for AI-powered code review platforms",
+  "Find AI startups in India that raised seed funding in 2025, with founders and website",
+  "Find freshers Java developer jobs in Bangalore",
 ];
 
 interface PromptInputProps {

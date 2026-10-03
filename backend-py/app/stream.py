@@ -8,11 +8,15 @@ import uuid
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 
+import hashlib
+
+from app import cache
 from app.agents.planner import plan_workflow
 from app.agents.source_discovery import discover_sources
 from app.agents.extraction import extract_all
 from app.agents.critic import check_health, heal_and_retry
 from app.agents.validator import validate_and_dedupe
+from app.enrich import enrich_emails
 from app.schemas import WorkflowSpec, SourceExtractionResult
 
 router = APIRouter()
@@ -161,6 +165,7 @@ async def _run_pipeline_stream(prompt: str, task_id: str | None = None):
                     fetch_errors=result.fetch_errors + ([healing.diagnosis] if healing.diagnosis else []),
                 )
             )
+        await asyncio.to_thread(enrich_emails, healed_results)
         _record_event(task_id, "Critic", "completed", "Extraction quality checked")
         yield _sse_event("critic:done", {"task_id": task_id})
     except Exception as err:
@@ -225,11 +230,24 @@ def _now():
     return datetime.now(timezone.utc).isoformat()
 
 
+async def _locked_stream(prompt: str, task_id: str | None):
+    name = "run:" + hashlib.sha256(prompt.encode("utf-8")).hexdigest()[:16]
+    token = cache.acquire_lock(name, 900)
+    if token is None:
+        yield _sse_event("pipeline:error", {"error": "This prompt is already running. Wait for it to finish."})
+        return
+    try:
+        async for chunk in _run_pipeline_stream(prompt, task_id):
+            yield chunk
+    finally:
+        cache.release_lock(name, token)
+
+
 @router.get("/api/workflows/run/stream")
 async def stream_workflow(prompt: str, task_id: str | None = None):
     """SSE endpoint: streams pipeline progress events as they happen."""
     return StreamingResponse(
-        _run_pipeline_stream(prompt, task_id),
+        _locked_stream(prompt, task_id),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",

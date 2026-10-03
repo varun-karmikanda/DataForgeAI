@@ -9,7 +9,7 @@ from tavily import TavilyClient
 
 from app.schemas import ResolvedResult, ResolvedSource, ResolvedWorkflowSpec, WorkflowSpec
 
-MAX_RESULTS_PER_SOURCE = 3
+MAX_RESULTS_PER_SOURCE = 5
 
 
 def _clean_domain(d: str) -> str:
@@ -86,6 +86,7 @@ def _tavily_search(client: TavilyClient, query: str, exclude: list) -> list:
     response = client.search(
         query=query,
         max_results=MAX_RESULTS_PER_SOURCE,
+        search_depth="advanced",
         include_raw_content=True,
         exclude_domains=exclude or None,
     )

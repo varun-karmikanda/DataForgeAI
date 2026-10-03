@@ -95,6 +95,22 @@ export default function DatasetsPage() {
                 View
               </button>
               <button
+                onClick={async () => {
+                  const detail = await getTask(task.task_id);
+                  const blob = new Blob([JSON.stringify(detail.validated_result.clean_records, null, 2)], { type: "application/json" });
+                  const url = URL.createObjectURL(blob);
+                  const a = document.createElement("a");
+                  a.href = url;
+                  a.download = `dataforge-${task.task_id.slice(0, 8)}.json`;
+                  a.click();
+                  URL.revokeObjectURL(url);
+                }}
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-mono text-text-secondary border border-border-subtle hover:border-cyan/30 hover:text-cyan transition-all"
+              >
+                <Download className="h-3.5 w-3.5" />
+                JSON
+              </button>
+              <button
                 onClick={() => handleExport(task)}
                 disabled={exportingId === task.task_id}
                 className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-mono bg-cyan/10 border border-cyan/20 text-cyan hover:bg-cyan/20 transition-all disabled:opacity-50"

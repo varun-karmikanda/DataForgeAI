@@ -3,10 +3,9 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useState } from "react";
-import { Menu, X, PlusCircle, History, Database, Sparkles, LayoutDashboard, Home } from "lucide-react";
+import { Menu, X, PlusCircle, History, Database, Sparkles, LayoutDashboard } from "lucide-react";
 
 const NAV_ITEMS = [
-  { label: "Home", href: "/", icon: Home },
   { label: "Dashboard", href: "/dashboard", icon: LayoutDashboard },
   { label: "New Task", href: "/", icon: PlusCircle },
   { label: "History", href: "/history", icon: History },

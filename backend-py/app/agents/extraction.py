@@ -12,6 +12,8 @@ from rapidfuzz import fuzz
 from urllib.parse import urljoin
 
 from app.llm import chat, provider
+from app.robots import is_allowed
+from app.agents.freshness import check_links, find_deadline, min_years_required, posting_status
 from app.schemas import ExtractedRecord, ResolvedSource, SourceExtractionResult
 
 MIN_FILLED_RATIO = 0.34  # drop records where fewer than this share of fields have a value
@@ -81,7 +83,7 @@ NEVER copy wording from the goal into a value. Every value must be copied exactl
         else ""
     )
     return f"""You are the Extraction Agent in a data-collection platform.
-{goal_block}Given the page text below, extract every distinct record you can find, using exactly
+{goal_block}Given the page text below, extract EVERY distinct record you can find (all rows, cards and list items, not just the first), using exactly
 these fields: {field_list}.
 Only use values that appear in the page text. Never guess or invent a value; use null instead.
 For each record, also include "citation_snippet": the exact short quote (under 25 words)
@@ -175,7 +177,67 @@ def _ground(data: dict, page_text: str) -> dict:
 FILTER_BATCH_SIZE = 15
 
 
+_ENTRY_LEVEL_GOAL_RE = re.compile(
+    r"fresher|entry[- ]?level|graduate|junior|trainee|intern\b|no experience|\b0\s*(?:-|to|–)\s*1\b",
+    re.IGNORECASE,
+)
+_SENIOR_TITLE_RE = re.compile(
+    r"\b(director|vp|vice president|president|chief|head|general manager|senior|sr\.?|principal|"
+    r"staff|architect|lead(?!\s+generation)|manager)\b",
+    re.IGNORECASE,
+)
+_JUNIOR_TITLE_RE = re.compile(r"trainee|intern|graduate|assistant|associate|junior|fresher", re.IGNORECASE)
+_JOB_GOAL_RE = re.compile(
+    r"\b(jobs?|hiring|vacanc\w*|openings?|careers?|positions?|recruit\w*|internships?|freshers?|walk-?in)\b",
+    re.IGNORECASE,
+)
+
+
+def _is_job_goal(goal: str) -> bool:
+    return bool(_JOB_GOAL_RE.search(goal or ""))
+
+
+def _is_senior_for_entry_goal(record, goal: str) -> bool:
+    """Free, no-LLM check: a senior job title can never satisfy a fresher / 0-1 year goal."""
+    if not _ENTRY_LEVEL_GOAL_RE.search(goal or ""):
+        return False
+    titles = [
+        str(v)
+        for k, v in record.data.items()
+        if v and any(h in k.lower() for h in ("title", "role", "position", "job_name"))
+    ]
+    title = " ".join(titles)
+    if not title or _JUNIOR_TITLE_RE.search(title):
+        return False
+    return bool(_SENIOR_TITLE_RE.search(title))
+
+
+ENTRY_MAX_YEARS = int(os.environ.get("ENTRY_MAX_YEARS", "1"))  # a "fresher" goal tolerates up to this many years
+
+
+def _over_experience_for_entry_goal(text: str, goal: str) -> int | None:
+    """Free, no-LLM check: returns the years asked for when it is more than a fresher goal allows."""
+    if not _ENTRY_LEVEL_GOAL_RE.search(goal or ""):
+        return None
+    years = min_years_required(text)
+    return years if years is not None and years > ENTRY_MAX_YEARS else None
+
+
 def filter_relevant(records: list, goal: str) -> list:
+    if goal:
+        before = len(records)
+        records = [r for r in records if not _is_senior_for_entry_goal(r, goal)]
+        if len(records) < before:
+            print(f"[extraction] dropped {before - len(records)} senior-title record(s) for entry-level goal (no LLM used)")
+        kept_exp = []
+        for r in records:
+            text = (r.citation_snippet or "") + "\n" + " ".join(str(v) for v in r.data.values() if v)
+            years = _over_experience_for_entry_goal(text, goal)
+            if years is not None:
+                print(f"[extraction] dropped {str(r.data)[:60]} -> asks {years}+ years experience (goal is entry-level)")
+            else:
+                kept_exp.append(r)
+        records = kept_exp
     if not goal or len(records) <= FILTER_BATCH_SIZE:
         return _filter_relevant_batch(records, goal)
     kept: list = []
@@ -201,6 +263,8 @@ Below are extracted records as "index: fields". Classify EACH record against the
 Return ONLY a JSON object: {{"verdicts": [{{"index": int, "status": "match"|"contradicts"|"unstated", "reason": string}}]}}
 - "match": the record clearly satisfies the goal.
 - "contradicts": a field clearly conflicts with the goal (wrong location, wrong experience level, unrelated role/topic).
+  A seniority word in the job title that conflicts with the requested experience level also counts as "contradicts"
+  (e.g. Director, Head, VP, Senior, Lead, Principal, General Manager when the goal asks for freshers / 0-1 years).
 - "unstated": the goal's criterion is not present in the record (do NOT treat a null field as a contradiction).
 
 Records:
@@ -211,8 +275,10 @@ Records:
         verdicts = {v["index"]: v for v in parsed.get("verdicts", []) if isinstance(v.get("index"), int)}
     except Exception as err:  # noqa: BLE001 — never lose data because the filter failed
         print(f"[extraction] relevance filter skipped: {err}")
+        for r in records:
+            r.match_status = "unconfirmed"
+            r.match_reason = "Relevance check skipped (AI rate-limited)"
         return records
-
     kept: list = []
     for i, record in enumerate(records):
         verdict = verdicts.get(i)
@@ -242,6 +308,19 @@ _CONNECTOR_FIELD_BUCKETS = [
     (("url", "link", "apply"), "url"),
     (("descript", "summary", "detail", "about"), "description"),
 ]
+
+
+_DEADLINE_FIELD_HINTS = ("deadline", "last_date", "closing", "apply_by", "expiry", "expires")
+
+
+def _fill_deadline_field(data: dict, text: str) -> None:
+    """If the plan has a deadline-style column and the text states a last date, fill it."""
+    deadline = find_deadline(text)
+    if not deadline:
+        return
+    for field in list(data):
+        if not data.get(field) and any(h in field.lower() for h in _DEADLINE_FIELD_HINTS):
+            data[field] = deadline.isoformat()
 
 
 def _parse_connector_record(raw_content: str, fallback_url: str, fields: list) -> dict:
@@ -300,13 +379,24 @@ def extract_from_connector_source(resolved_source: ResolvedSource, fields: list,
     """Connector sources are already structured data — parse them directly, no LLM per posting."""
     records: list = []
     errors: list = []
+    closed_count = 0
 
     for result in resolved_source.resolved:
         raw_content = result.raw_content or ""
         if not raw_content.strip():
             errors.append(f"{result.url}: connector returned no content")
             continue
+        status, why = posting_status(raw_content)
+        if status in ("closed", "expired"):
+            closed_count += 1
+            print(f"[freshness] dropped connector posting {result.url[:70]} -> {why}")
+            continue
+        years = _over_experience_for_entry_goal(raw_content, goal)
+        if years is not None:
+            print(f"[extraction] dropped connector posting {result.url[:60]} -> asks {years}+ years experience (goal is entry-level)")
+            continue
         data = _parse_connector_record(raw_content, result.url, fields)
+        _fill_deadline_field(data, raw_content)
         filled = sum(1 for f in fields if data.get(f))
         if filled < max(2, int(len(fields) * MIN_FILLED_RATIO)):
             continue  # posting didn't have enough of the requested fields
@@ -320,9 +410,24 @@ def extract_from_connector_source(resolved_source: ResolvedSource, fields: list,
                 match_status="match",  # came directly from the source's own structured feed, nothing to ground
             )
         )
-    print(f"[extraction] connector {resolved_source.query_or_url!r} -> parsed {len(records)}/{len(resolved_source.resolved)} postings, no LLM calls")
+    print(f"[extraction] connector {resolved_source.query_or_url!r} -> parsed {len(records)}/{len(resolved_source.resolved)} postings ({closed_count} closed/expired dropped), no LLM calls")
 
     records = filter_relevant(records, goal)  # one batched call for the whole source, not per-record
+
+    # Only the survivors: open each apply link and drop ones whose page says the job is gone.
+    link_results = check_links([r.source_url for r in records])
+    if link_results:
+        alive = []
+        for r in records:
+            status, why, page_years = link_results.get(r.source_url, ("unknown", "", None))
+            if status == "closed":
+                print(f"[freshness] dropped dead link {r.source_url[:70]} -> {why}")
+            elif page_years is not None and _ENTRY_LEVEL_GOAL_RE.search(goal or "") and page_years > ENTRY_MAX_YEARS:
+                print(f"[extraction] dropped {r.source_url[:60]} -> job page asks {page_years}+ years experience (goal is entry-level)")
+            else:
+                alive.append(r)
+        print(f"[extraction] link check: {len(records) - len(alive)} dropped of {len(records)} (dead link or too much experience)")
+        records = alive
     return SourceExtractionResult(query_or_url=resolved_source.query_or_url, records=records, fetch_errors=errors)
 
 
@@ -333,6 +438,10 @@ def extract_from_source(resolved_source: ResolvedSource, fields: list, goal: str
     errors: list = []
 
     for result in resolved_source.resolved:
+        if not is_allowed(result.url):
+            errors.append(f"{result.url}: skipped, disallowed by robots.txt")
+            print(f"[extraction] ROBOTS BLOCKED {result.url}")
+            continue
         try:
             page_text = get_page_text(result)
         except Exception as err:  # noqa: BLE001
@@ -358,6 +467,13 @@ def extract_from_source(resolved_source: ResolvedSource, fields: list, goal: str
             for key, value in data.items():
                 if isinstance(value, str) and value.startswith("/") and any(h in key.lower() for h in ("link", "url")):
                     data[key] = urljoin(result.url, value)  # make relative links absolute
+            record_text = (raw.get("citation_snippet") or "") + "\n" + " ".join(str(v) for v in data.values() if v)
+            if _is_job_goal(goal):
+                status, why = posting_status(record_text)
+                if status in ("closed", "expired"):
+                    print(f"[freshness] dropped {str(data)[:70]} -> {why}")
+                    continue
+            _fill_deadline_field(data, record_text)
             filled = sum(1 for f in fields if data.get(f))
             if filled < max(2, int(len(fields) * MIN_FILLED_RATIO)):
                 continue  # mostly-null record: page wasn't really a listing for this goal

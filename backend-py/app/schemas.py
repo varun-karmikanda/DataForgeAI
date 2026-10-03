@@ -8,7 +8,7 @@ from pydantic import BaseModel, Field
 
 class ConnectorParams(BaseModel):
     """Parameters for a structured job-API source (ATS boards / aggregators)."""
-    provider: Literal["adzuna", "greenhouse", "lever", "remoteok", "arbeitnow", "usajobs"]
+    provider: Literal["adzuna", "jooble", "greenhouse", "lever", "remoteok", "arbeitnow", "usajobs"]
     keywords: str = ""   # free-text search terms (aggregators)
     location: str = ""   # city/region filter (aggregators)
     company: str = ""    # board slug for ATS providers (greenhouse/lever)

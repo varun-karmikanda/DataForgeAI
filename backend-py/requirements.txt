@@ -54,3 +54,5 @@ redis==5.2.0
 rq==2.0.0
 trafilatura==1.12.2
 rapidfuzz
+pypdf
+python-multipart

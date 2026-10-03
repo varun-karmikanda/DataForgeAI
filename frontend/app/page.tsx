@@ -8,9 +8,11 @@ import { ParticleField } from "@/components/shared/particle-field";
 import { AuroraBackground } from "@/components/shared/aurora-background";
 import { HeroSection } from "@/components/landing/hero-section";
 import { PromptInput } from "@/components/landing/prompt-input";
+import { ResumeUpload } from "@/components/landing/resume-upload";
 
 export default function HomePage() {
   const [isLoading, setIsLoading] = useState(false);
+  const [mode, setMode] = useState<"resume" | "prompt">("prompt");
   const router = useRouter();
 
   const handleSubmit = (prompt: string) => {
@@ -45,7 +47,29 @@ export default function HomePage() {
               className="flex flex-col items-center gap-12 w-full"
             >
               <HeroSection />
-              <PromptInput onSubmit={handleSubmit} isLoading={isLoading} />
+              <div className="flex rounded-full border border-border-subtle bg-elevated/50 p-1 text-xs font-mono">
+                {([
+                  ["resume", "Upload resume"],
+                  ["prompt", "Type a prompt"],
+                ] as const).map(([key, label]) => (
+                  <button
+                    key={key}
+                    onClick={() => setMode(key)}
+                    className={
+                      mode === key
+                        ? "rounded-full bg-cyan/10 px-4 py-1.5 text-cyan"
+                        : "rounded-full px-4 py-1.5 text-text-muted hover:text-text-primary"
+                    }
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+              {mode === "resume" ? (
+                <ResumeUpload onSubmit={handleSubmit} isLoading={isLoading} />
+              ) : (
+                <PromptInput onSubmit={handleSubmit} isLoading={isLoading} />
+              )}
             </motion.div>
           ) : (
             <motion.div
